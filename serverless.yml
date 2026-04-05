@@ -1,0 +1,211 @@
+service: warrantor-backend
+
+useDotenv: true
+
+build:
+  esbuild:
+    bundle: true
+    minify: true
+
+package:
+  individually: true
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1
+  httpApi:
+    cors: true
+
+  environment:
+    COGNITO_USER_POOL_ID: ${env:COGNITO_USER_POOL_ID}
+    COGNITO_CLIENT_ID: ${env:COGNITO_CLIENT_ID}
+    S3_BUCKET_NAME: warrantor-uploads-${sls:stage}-${aws:accountId}
+
+  iam:
+    role:
+      statements:
+        - Effect: "Allow"
+          Action:
+            - "dynamodb:PutItem"
+            - "dynamodb:Query"
+            - "dynamodb:GetItem"
+            - "dynamodb:UpdateItem"
+            - "dynamodb:DeleteItem"
+          Resource: 
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/warranties"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/warranties/index/*"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/notifications"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/notifications/index/*"
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/settings"
+
+        - Effect: "Allow"
+          Action:
+            - "cognito-idp:AdminGetUser"
+            - "cognito-idp:AdminUpdateUserAttributes"
+            - "cognito-idp:AdminSetUserPassword"
+          Resource: "arn:aws:cognito-idp:${aws:region}:${aws:accountId}:userpool/${env:COGNITO_USER_POOL_ID}"
+
+        - Effect: "Allow"
+          Action:
+            - "s3:PutObject"
+            - "s3:GetObject"
+          Resource: "arn:aws:s3:::${self:provider.environment.S3_BUCKET_NAME}/*"
+functions:
+  createWarranty:
+    handler: src/functions/warranties/create.handler
+    events:
+      - httpApi:
+          path: /warranties
+          method: POST
+
+  listWarranties:
+    handler: src/functions/warranties/get.handler
+    events:
+      - httpApi:
+          path: /warranties
+          method: GET
+        
+  deleteWarranty:
+    handler: src/functions/warranties/remove.handler
+    events:
+      - httpApi:
+          path: /warranties/{id}
+          method: DELETE
+
+  updateWarranty:
+    handler: src/functions/warranties/update.handler
+    events:
+      - httpApi:
+          path: /warranties/{id}
+          method: PUT
+
+  getNotifications:
+    handler: src/functions/notifications/get.handler
+    events:
+      - httpApi:
+          path: /notifications
+          method: GET
+
+  getSettings:
+    handler: src/functions/settings/get.handler
+    events:
+      - httpApi:
+          path: /settings
+          method: GET
+
+  updateSettings:
+    handler: src/functions/settings/update.handler
+    events:
+      - httpApi:
+          path: /settings
+          method: PUT
+
+  getUploadUrl:
+    handler: src/functions/uploads/getUploadUrl.handler
+    events:
+      - httpApi:
+          path: /uploads
+          method: GET
+
+resources:
+  Resources:
+    WarrantiesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: warranties
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: userId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: userId-index
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+            ProvisionedThroughput:
+              ReadCapacityUnits: 1
+              WriteCapacityUnits: 1
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+
+    NotificationsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: notifications
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: createdAt
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: userId-createdAt-index
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+              - AttributeName: createdAt
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+            ProvisionedThroughput:
+              ReadCapacityUnits: 1
+              WriteCapacityUnits: 1
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+
+    SettingsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: settings
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+
+    UploadsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.S3_BUCKET_NAME}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: false
+          IgnorePublicAcls: false
+          BlockPublicPolicy: false
+          RestrictPublicBuckets: false
+        CorsConfiguration:
+          CorsRules:
+            - AllowedMethods:
+                - GET
+                - PUT
+              AllowedOrigins:
+                - "*"
+              AllowedHeaders:
+                - "*"
+
+    UploadsBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref UploadsBucket
+        PolicyDocument:
+          Statement:
+            - Action: s3:GetObject
+              Effect: Allow
+              Principal: "*"
+              Resource: arn:aws:s3:::${self:provider.environment.S3_BUCKET_NAME}/*

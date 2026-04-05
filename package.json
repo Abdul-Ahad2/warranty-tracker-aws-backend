@@ -1,0 +1,26 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.1024.0",
+    "@aws-sdk/client-dynamodb": "^3.1024.0",
+    "@aws-sdk/client-s3": "^3.1024.0",
+    "@aws-sdk/s3-request-presigner": "^3.1024.0",
+    "@aws-sdk/util-dynamodb": "^3.996.2",
+    "aws-jwt-verify": "^5.1.1",
+    "dot-env": "^0.0.1",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "serverless-esbuild": "^1.57.0"
+  }
+}
