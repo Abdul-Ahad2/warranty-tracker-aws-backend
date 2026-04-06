@@ -22,13 +22,13 @@ A fully serverless backend for warranty management built on AWS Lambda, DynamoDB
 ### Key Capabilities
 
 - **Serverless Compute** — AWS Lambda with automatic scaling and pay-per-invocation pricing
-- **Enterprise Authentication** — JWT-based authentication via AWS Cognito
+- **Enterprise Authentication** — JWT-based native authorizers via AWS Cognito
 - **High-Performance Database** — DynamoDB with Global Secondary Indexes and sub-millisecond latency
-- **Secure File Storage** — S3 with presigned URLs for direct client uploads
-- **AI-Powered Summaries** — AWS Bedrock with Gemma 3 4B for intelligent summaries
-- **Real-Time Notifications** — Dynamic notification system with automatic expiry tracking
-- **Clean Architecture** — 4-tier abstraction separating handlers, services, libraries, and utilities
-- **Infrastructure as Code** — Single-command CloudFormation deployment via Serverless Framework
+- **Automated Lifecycle** — Amazon EventBridge Scheduler + SES for precision email alerts
+- **Cascading Integrity** — Automated cleanup of schedules and notifications on warranty update/delete
+- **Dynamic Notifications** — Dual-source engine merging real-time "Expires Soon" queries with historical logs
+- **Clean Architecture** — 4-tier separation: Handlers (Routing), Services (Logic), Libs (SDKs), Utils (Shared)
+- **Infrastructure as Code** — Full CloudFormation orchestration via Serverless Framework
 
 ---
 
@@ -39,56 +39,59 @@ The backend uses a completely serverless infrastructure orchestrated by the Serv
 
 ## System Architecture
 
-```mermaid
-flowchart TD
-    subgraph AWS["AWS Cloud Environment"]
-        APIGW[" API Gateway (HTTP APIs)"]
-        Lambda[" AWS Lambda (Node.js 20.x)"]
-        Cognito[" AWS Cognito (User Pools)"]
-        Dynamo["DynamoDB (NoSQL)"]
-        S3["Amazon S3 (Uploads Bucket)"]
-    end
+<img width="1434" height="1229" alt="wmremove-transformed" src="https://github.com/user-attachments/assets/da3c2c5f-d19b-4170-a934-a9d8c09182cd" />
 
-    Client(["Client Application"]) -->|HTTP Request| APIGW
-    APIGW -->|Proxy Integration| Lambda
-    Lambda -->|Get / Auth| Cognito
-    Lambda <-->|CRUD Operations| Dynamo
-    Lambda -->|Generate Presigned URL| S3
-    Client -->|Direct PUT Upload| S3
-```
 
-### Architecture Principles
+### Infrastructure Principles
 
-- **Zero idle costs** — Pay only for requests processed
-- **Automatic scaling** — Lambda handles concurrent requests without manual intervention
-- **Isolated execution** — Each function runs in its own secure environment
-- **Granular permissions** — IAM policies follow principle of least privilege
-- **No server management** — AWS handles all infrastructure maintenance
+- **Zero Idle Costs** — Billing is 100% proportional to user traffic
+- **Automatic Scaling** — Lambda manages concurrency; DynamoDB handles throughput peaks
+- **Least Privilege** — IAM Policies restrict functions to specific table rows and S3 prefixes
+- **Native Auth** — Offloads JWT validation to AWS API Gateway for sub-10ms overhead
+
+---
+
+## Automation & Lifecycle
+
+The backend implements a complex notification lifecycle to ensure users never miss a warranty expiration.
+
+### Precision Triggering
+When a warranty is created or updated, [scheduler.js](file:///Users/abdulahad/Desktop/business/career/untitled%20folder/backend/src/services/scheduler.js) creates **two distinct one-time schedules**:
+1.  **7-Day Reminder**: Triggered exactly 168 hours before the `expiryDate`.
+2.  **Expiry Alert**: Triggered at midnight on the `expiryDate`.
+
+### Cascading Integrity
+To prevent "ghost" notifications, the [warrantyService.js](file:///Users/abdulahad/Desktop/business/career/untitled%20folder/backend/src/services/warranties.js) implements automated cleanup:
+- **On Update**: Old schedules are purged and recalculated based on the new `expiryDate`.
+- **On Delete**: All pending schedules and historical notifications are permanently deleted.
+
+### Dynamic Notification Engine
+The [notificationService.js](file:///Users/abdulahad/Desktop/business/career/untitled%20folder/backend/src/services/notifications.js) uses a **dual-source architecture**:
+1.  **Historical Feed**: Fetches events logged to the `notifications` table by the Dispatcher.
+2.  **Virtual Feed**: Performs a real-time scan of the `warranties` table for items expiring within 60 days.
+3.  **Deduplicated Merge**: Combines both sources, sorting by timestamp for a seamless user experience.
 
 ---
 
 ## Technology Stack
 
 ### Compute & Routing
-**AWS Lambda + HTTP API Gateway** — Serverless functions triggered by HTTP requests. Gateway routes based on path and method. No managing EC2 instances or containers.
+**AWS Lambda + HTTP API Gateway (v2)** — Fast, low-latency entry points. API Gateway offloads TLS termination and JWT validation, keeping Lambda warm-starts lean.
 
-### Authentication & Identity
-**Amazon Cognito + JWT** — Cognito manages user signup, login, and password reset. Custom middleware validates JWT tokens on every request, extracting userId for authorization checks.
+### Identity & Access
+**Amazon Cognito + Native JWT** — Users are mapped via the `sub` claim. The `authMiddleware` Extracts user identity and handles automatic Base64 decoding for application/json payloads.
 
-### Database
-**Amazon DynamoDB** — Fully managed NoSQL database. Single-table design with Global Secondary Indexes for efficient queries. Sub-millisecond latency at any scale.
+### NoSQL State
+**Amazon DynamoDB** — Single-table architecture patterns. Uses Partition Keys (`userId`) and Sort Keys (`id`) for efficient multi-tenant isolation. Includes indexed attributes for rapid notification fetching.
 
-### Storage
-**Amazon S3 + Presigned URLs** — Bypasses the 6MB Lambda payload limit by generating temporary upload URLs. Clients upload directly to S3, streaming images without touching Lambda.
+### Lifecycle Hub
+**EventBridge Scheduler + SES** — One-time triggers provide precision without the cost of a persistent crontab. Amazon SES is configured with production-grade DKIM/SPF identities for maximum deliverability.
 
-### AI Integration
-**AWS Bedrock (Gemma 3 4B)** — Generates warranty summaries for users. Costs $0.04 per 1M input tokens and $0.08 per 1M output tokens — approximately 99% cheaper than Claude.
+### Storage Layers
+**Amazon S3 + Presigned Flow** — Clients receive a temporary `PUT` URL. Images follow the naming convention: `warranties/{userId}/{fileId}.jpg` to ensure isolation at the bucket level.
 
-### Infrastructure as Code
-**Serverless Framework** — Deploys CloudFormation stacks from `serverless.yml`. One command provisions tables, functions, API routes, S3 buckets, and IAM permissions.
-
-### Bundling
-**esbuild** — Minifies and tree-shakes dependencies before upload, reducing bundle sizes from ~5MB to ~200KB.
+### Infrastructure & Bundling
+**Serverless v4 + esbuild** — Fully defined in `serverless.yml`. esbuild performs tree-shaking on `@aws-sdk` clients, reducing cold starts by stripping unused service logic.
 
 ---
 
@@ -130,49 +133,52 @@ sequenceDiagram
 ### Warranties Table
 ```
 Primary Key: id (UUID)
-Sort Key: userId
+Partition Key: id
+(Multi-tenancy enforced via userId check on every request)
 
 Fields:
-├─ productName (string)
-├─ brand (string)
-├─ category (string)
-├─ warrantyProvider (string)
-├─ purchaseDate (ISO date)
-├─ expiryDate (ISO date)
-├─ coverageDetails (string)
-├─ pictureUrl (S3 URL)
+├─ id (UUID, HASH)
+├─ userId (Cognito sub ID)
+├─ productName (String)
+├─ brand (String)
+├─ category (String)
+├─ warrantyProvider (String)
+├─ purchaseDate (ISO 8601 Date)
+├─ expiryDate (ISO 8601 Date)
+├─ coverageDetails (String)
+├─ pictureUrl (S3 Bucket URI)
 
 Indexes:
-└─ userId-index (query all warranties for a user)
+└─ userId-index (Allows fetching all warranties for a specific user)
 ```
 
 ### Notifications Table
 ```
 Primary Key: id (UUID)
-Sort Key: userId
+Partition Key: id
 
 Fields:
-├─ warrantyId (reference)
-├─ productName (string)
-├─ isRead (boolean)
-├─ createdAt (ISO timestamp)
-├─ expiresAt (ISO date)
-
-Computed on Fetch:
-├─ type (EXPIRY_WARNING | EXPIRED)
-├─ title (display heading)
-├─ message (formatted string)
-├─ daysLeft (computed from expiresAt)
+├─ id (UUID, HASH)
+├─ userId (Cognito sub ID)
+├─ warrantyId (Foreign reference)
+├─ productName (String)
+├─ message (Email Subject / Alert Text)
+├─ type (EXPIRY_NOTICE | EXPIRY_WARNING | EXPIRED)
+├─ read (boolean - defaults to false)
+├─ createdAt (ISO 8601 Timestamp)
+├─ expiresAt (ISO 8601 Date)
 
 Indexes:
-└─ userId-createdAt-index (list recent notifications for user)
+└─ userId-createdAt-index (Allows querying history sorted by time)
 ```
 
 ### Settings Table
 ```
 Primary Key: userId (Cognito ID)
+(Direct access via userId)
 
 Fields:
+├─ userId (Cognito sub ID)
 ├─ language (e.g., en-US)
 ├─ notificationsEnabled (boolean)
 ```
@@ -200,14 +206,19 @@ Content-Type: application/json
 }
 ```
 
-**Response (201 Created)**
-```json
-{
-  "message": "Warranty created successfully"
-}
-```
+**Validation Requirements**
+- `productName` (String, required)
+- `brand` (String, required)
+- `category` (String, required)
+- `warrantyProvider` (String, required)
+- `purchaseDate` (ISO Date, required)
+- `expiryDate` (ISO Date, required)
+- `coverageDetails` (String, required)
+- `pictureUrl` (S3 URL, required)
 
-Upon creation, a notification is automatically generated with `type: EXPIRY_WARNING`.
+**Background Operations**
+1.  Schedules two precision triggers in **EventBridge Scheduler**.
+2.  Automated cleanup of any previous schedules for the same ID (if updating).
 
 ### List Warranties
 
@@ -288,32 +299,20 @@ Authorization: Bearer <token>
       "productName": "MacBook Pro 16\"",
       "type": "EXPIRY_WARNING",
       "title": "EXPIRY WARNING",
-      "message": "Your MacBook Pro 16\" warranty expires in 12 days. Consider filing any pending claims.",
-      "daysLeft": 12,
-      "isRead": false,
+      "message": "Your MacBook Pro 16\" warranty expires in 7 days.",
+      "read": false,
       "createdAt": "2026-04-05T10:00:00Z",
-      "expiresAt": "2026-04-17T00:00:00Z"
-    },
-    {
-      "id": "abc123-def4",
-      "warrantyId": "another-warranty-id",
-      "productName": "iPhone 13",
-      "type": "EXPIRED",
-      "title": "EXPIRED",
-      "message": "Your iPhone 13 warranty has expired. You can no longer file claims.",
-      "daysLeft": -5,
-      "isRead": true,
-      "createdAt": "2026-03-15T10:00:00Z",
-      "expiresAt": "2026-04-10T00:00:00Z"
+      "expiresAt": "2026-04-12T00:00:00Z"
     }
   ],
   "unreadCount": 1
 }
 ```
 
-Types are computed dynamically based on `daysLeft`:
-- `daysLeft > 0` → `EXPIRY_WARNING`
-- `daysLeft ≤ 0` → `EXPIRED`
+**Note on Types**:
+- `EXPIRY_WARNING`: Scheduled alert sent 7 days before.
+- `EXPIRY_NOTICE`: Direct log from the Dispatcher.
+- `EXPIRED`: Computed live for items with `daysLeft <= 0`.
 
 ### Get Settings
 
@@ -406,20 +405,22 @@ warrantor-backend/
 │   │   │   ├── remove.js          # DELETE /warranties/{id}
 │   │   │   └── getUploadUrl.js    # GET /uploads
 │   │   ├── notifications/
-│   │   │   └── get.js             # GET /notifications
+│   │   │   ├── get.js             # GET /notifications
+│   │   │   └── dispatch.js        # EventBridge Trigger -> SES Email
 │   │   └── settings/
 │   │       ├── get.js             # GET /settings
 │   │       └── update.js          # PUT /settings
 │   │
 │   ├── services/                  # Business logic (pure functions)
-│   │   ├── warrantyService.js
-│   │   ├── notificationService.js
-│   │   └── settingsService.js
+│   │   ├── warranties.js
+│   │   ├── notifications.js
+│   │   ├── scheduler.js           # EventBridge scheduling logic
+│   │   ├── settings.js
+│   │   └── uploads.js
 │   │
 │   ├── libs/                       # AWS SDK clients (initialized once)
-│   │   ├── dynamo.js
-│   │   ├── cognito.js
-│   │   └── s3.js
+│   │   ├── aws.js                  # Shared AWS SDK v3 clients
+│   │   └── email.js                # SES wrapper
 │   │
 │   ├── middleware/                 # Auth & validation
 │   │   └── auth.js                 # JWT verification
@@ -471,7 +472,15 @@ Fill in your AWS Cognito details from the AWS Console:
 ```env
 COGNITO_USER_POOL_ID=us-east-1_XXXXXXXXX
 COGNITO_CLIENT_ID=abcdef1234567890
+SES_DOMAIN=yourdomain.com
+SCHEDULER_ROLE_ARN=arn:aws:iam::XXXX:role/warrantor-scheduler-role-dev
 ```
+
+### AWS Setup Verification
+
+1.  **SES Domain**: Ensure the domain in `SES_DOMAIN` is **Verified** in the AWS SES Console.
+2.  **Scheduler Role**: The `SCHEDULER_ROLE_ARN` must have the `lambda:InvokeFunction` permission for your backend functions.
+3.  **Cognito**: Create a User Pool and App Client. Ensure `AllowAdminCreateUserOnly` is disabled if you want public signups.
 
 ### Deployment
 
@@ -520,32 +529,27 @@ Or use Postman:
 
 ## Security
 
-### Authentication Layer
+### Authentication Architecture
 
-Every request (except raw S3 reads) is protected by `authMiddleware`:
+The backend uses a hybrid authentication model:
+1.  **Transport Security (TLS 1.3)** — All requests must use HTTPS.
+2.  **API Gateway Authorizer** — Validates JWT signatures via the `JWKS_URI` from Cognito.
+3.  **Application Middleware** — The [auth.js](file:///Users/abdulahad/Desktop/business/career/untitled%20folder/backend/src/middleware/auth.js) wrapper:
+    - Extracts the `sub` claim from the Cognito JWT.
+    - Attaches `event.userId` for service-layer consumption.
+    - Decodes incoming Base64 bodies (standard for some API Gateway integrations).
+    - Parses JSON payloads and handles syntax errors.
 
-1. Extract JWT from `Authorization: Bearer` header
-2. Verify signature using Cognito's public keys (RSA256)
-3. Check token expiration
-4. Extract `userId` (Cognito user ID) and attach to event
-5. Proceed to handler or reject with 401
+### Zero-Trust Authorization
 
-### Authorization Layer
-
-Every database operation includes a `ConditionExpression` preventing one user from accessing another's data:
+Every database command uses a `ConditionExpression` to ensure cross-user data isolation:
 
 ```javascript
-// Example: user cannot delete another user's warranty
-const command = new DeleteItemCommand({
-  TableName: "warranties",
-  Key: {
-    id: { S: warrantyId },
-    userId: { S: userId }     // From JWT
-  }
-});
+// From src/services/warranties.js
+ConditionExpression: "userId = :userId"
 ```
 
-If the provided `userId` doesn't match the warranty owner, the delete fails.
+This ensures that even if a user guesses another user's `warrantyId`, the AWS SDK will reject the operation at the database level because the `userId` claim (extracted from the cryptographically verified JWT) will not match.
 
 ### IAM Permissions
 
@@ -575,7 +579,9 @@ Estimated monthly costs for 1,000 active users:
 | S3 | 100GB storage + 1GB transfer | $2.50 |
 | Cognito | 1,000 MAU (free tier included) | $0.00 |
 | Bedrock | 1M tokens/month | $0.20 |
-| **Total** | | **$5.20/month** |
+| SES | 10,000 emails/month | $1.00 |
+| Scheduler | 20,000 triggers/month | $0.20 |
+| **Total** | | **$7.40/month** |
 
 Compare to traditional infrastructure:
 - EC2 + RDS + LoadBalancer: $500–1,000/month minimum
