@@ -16,11 +16,22 @@ provider:
   region: us-east-1
   httpApi:
     cors: true
+    authorizers:
+      cognitoAuthorizer:
+        type: jwt
+        identitySource: $request.header.Authorization
+        issuerUrl: https://cognito-idp.us-east-1.amazonaws.com/${env:COGNITO_USER_POOL_ID}
+        audience:
+          - ${env:COGNITO_CLIENT_ID}
 
   environment:
     COGNITO_USER_POOL_ID: ${env:COGNITO_USER_POOL_ID}
     COGNITO_CLIENT_ID: ${env:COGNITO_CLIENT_ID}
     S3_BUCKET_NAME: warrantor-uploads-${sls:stage}-${aws:accountId}
+    AWS_ACCOUNT_ID: ${aws:accountId}
+    SCHEDULER_ROLE_ARN: arn:aws:iam::${aws:accountId}:role/warrantor-scheduler-role-${sls:stage}
+    SES_DOMAIN: ${env:SES_DOMAIN}
+    SLS_STAGE: ${sls:stage}
 
   iam:
     role:
@@ -51,6 +62,25 @@ provider:
             - "s3:PutObject"
             - "s3:GetObject"
           Resource: "arn:aws:s3:::${self:provider.environment.S3_BUCKET_NAME}/*"
+
+        - Effect: "Allow"
+          Action:
+            - "ses:SendEmail"
+            - "ses:SendRawEmail"
+          Resource: "*"
+
+        - Effect: "Allow"
+          Action:
+            - "scheduler:CreateSchedule"
+            - "scheduler:DeleteSchedule"
+            - "scheduler:GetSchedule"
+          Resource: "arn:aws:scheduler:${aws:region}:${aws:accountId}:schedule/*"
+
+        - Effect: "Allow"
+          Action:
+            - "iam:PassRole"
+          Resource: "arn:aws:iam::${aws:accountId}:role/warrantor-scheduler-role-${sls:stage}"
+
 functions:
   createWarranty:
     handler: src/functions/warranties/create.handler
@@ -58,6 +88,8 @@ functions:
       - httpApi:
           path: /warranties
           method: POST
+          authorizer:
+            name: cognitoAuthorizer
 
   listWarranties:
     handler: src/functions/warranties/get.handler
@@ -65,6 +97,8 @@ functions:
       - httpApi:
           path: /warranties
           method: GET
+          authorizer:
+            name: cognitoAuthorizer
         
   deleteWarranty:
     handler: src/functions/warranties/remove.handler
@@ -72,6 +106,8 @@ functions:
       - httpApi:
           path: /warranties/{id}
           method: DELETE
+          authorizer:
+            name: cognitoAuthorizer
 
   updateWarranty:
     handler: src/functions/warranties/update.handler
@@ -79,6 +115,8 @@ functions:
       - httpApi:
           path: /warranties/{id}
           method: PUT
+          authorizer:
+            name: cognitoAuthorizer
 
   getNotifications:
     handler: src/functions/notifications/get.handler
@@ -86,6 +124,8 @@ functions:
       - httpApi:
           path: /notifications
           method: GET
+          authorizer:
+            name: cognitoAuthorizer
 
   getSettings:
     handler: src/functions/settings/get.handler
@@ -93,6 +133,8 @@ functions:
       - httpApi:
           path: /settings
           method: GET
+          authorizer:
+            name: cognitoAuthorizer
 
   updateSettings:
     handler: src/functions/settings/update.handler
@@ -100,6 +142,8 @@ functions:
       - httpApi:
           path: /settings
           method: PUT
+          authorizer:
+            name: cognitoAuthorizer
 
   getUploadUrl:
     handler: src/functions/uploads/getUploadUrl.handler
@@ -107,6 +151,13 @@ functions:
       - httpApi:
           path: /uploads
           method: GET
+          authorizer:
+            name: cognitoAuthorizer
+
+  dispatchNotification:
+    handler: src/functions/notifications/dispatch.handler
+    name: warrantor-backend-${sls:stage}-dispatch
+    # No HTTP event - triggered by EventBridge Scheduler
 
 resources:
   Resources:
@@ -209,3 +260,24 @@ resources:
               Effect: Allow
               Principal: "*"
               Resource: arn:aws:s3:::${self:provider.environment.S3_BUCKET_NAME}/*
+
+    SchedulerRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: warrantor-scheduler-role-${sls:stage}
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: scheduler.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: SchedulerInvokeLambda
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action: lambda:InvokeFunction
+                  Resource: 
+                    - arn:aws:lambda:${aws:region}:${aws:accountId}:function:warrantor-backend-${sls:stage}-*

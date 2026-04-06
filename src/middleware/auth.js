@@ -1,27 +1,19 @@
-import { CognitoJwtVerifier } from "aws-jwt-verify";
-
-const verifier = CognitoJwtVerifier.create({
-  userPoolId: process.env.COGNITO_USER_POOL_ID,
-  tokenUse: "access",
-  clientId: process.env.COGNITO_CLIENT_ID
-});
+import { successResponse, errorResponse } from "../utils/response.js";
 
 export const authMiddleware = (handler) => {
   return async (event) => {
     try {
-      const token = event.headers?.authorization?.replace('Bearer ', '');
+      // 1. Extract claims from the Native HTTP API Authorizer
+      const claims = event.requestContext?.authorizer?.jwt?.claims;
 
-      if (!token) {
-        return {
-          statusCode: 401,
-          body: JSON.stringify({ error: 'Unauthorized: No token provided' })
-        };
+      if (!claims) {
+        return errorResponse(401, "Unauthorized: Native authentication failed");
       }
 
-      const payload = await verifier.verify(token);
+      // 2. Set userId for downstream handlers (compatible with existing code)
+      event.userId = claims.sub || claims.username;
 
-      event.userId = payload.sub || payload.username;
-
+      // 3. Keep body parsing logic if it's still needed (common for HTTP API)
       if (event.body) {
         if (event.isBase64Encoded && typeof event.body === 'string') {
           event.body = Buffer.from(event.body, 'base64').toString('utf-8');
@@ -37,11 +29,8 @@ export const authMiddleware = (handler) => {
 
       return await handler(event);
     } catch (error) {
-      console.error("JWT Verification failed:", error);
-      return {
-        statusCode: 401,
-        body: JSON.stringify({ error: 'Unauthorized: Invalid token' })
-      };
+      console.error("Auth Middleware Error:", error);
+      return errorResponse(401, "Unauthorized: Authentication error");
     }
   };
 };

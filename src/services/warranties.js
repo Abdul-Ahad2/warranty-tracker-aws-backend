@@ -2,6 +2,7 @@ import { PutItemCommand, UpdateItemCommand, QueryCommand, DeleteItemCommand } fr
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { v4 as uuid } from "uuid";
 import { dynamodb } from "../libs/aws.js";
+import { scheduleExpiryNotifications, deleteExpiryNotifications } from "./scheduler.js";
 
 export const createWarrantyService = async (userId, body) => {
   const warrantyId = uuid();
@@ -32,21 +33,23 @@ export const createWarrantyService = async (userId, body) => {
 
   await dynamodb.send(warrantyCommand);
 
-  // Create notification
-  const notificationCommand = new PutItemCommand({
-    TableName: "notifications",
-    Item: {
-      id: { S: uuid() },
-      userId: { S: userId },
-      warrantyId: { S: warrantyId },
-      productName: { S: body.productName },
-      isRead: { BOOL: false },
-      createdAt: { S: new Date().toISOString() },
-      expiresAt: { S: body.expiryDate },
-    },
-  });
+  await dynamodb.send(warrantyCommand);
 
-  await dynamodb.send(notificationCommand);
+  const warranty = {
+    id: warrantyId,
+    userId: userId,
+    productName: body.productName,
+    expiryDate: body.expiryDate,
+  };
+
+  // Create the alarms (Awaiting ensures we see confirmation logs in CloudWatch)
+  try {
+    await scheduleExpiryNotifications(warranty);
+  } catch (err) {
+    console.error("Critical: Failed to schedule expiry alarms:", err);
+    // Note: We still return success for the warranty creation, 
+    // but the logs will now show the alarm failure clearly.
+  }
 
   return { message: "Warranty created successfully", warrantyId };
 };
@@ -100,6 +103,28 @@ export const updateWarrantyService = async (userId, warrantyId, body) => {
   });
 
   await dynamodb.send(command);
+
+  // If the expiry date is changed, we must re-calculate schedules
+  if (body.expiryDate) {
+    // 1. Delete old schedules & 2. Re-schedule (Awaiting ensures logs are captured)
+    try {
+      await deleteExpiryNotifications(warrantyId);
+      
+      const getCommand = new QueryCommand({
+        TableName: "warranties",
+        KeyConditionExpression: "id = :id",
+        ExpressionAttributeValues: { ":id": { S: warrantyId } }
+      });
+      
+      const res = await dynamodb.send(getCommand);
+      if (res.Items && res.Items[0]) {
+        const fullWarranty = unmarshall(res.Items[0]);
+        await scheduleExpiryNotifications(fullWarranty);
+      }
+    } catch (err) {
+      console.error("Critical: Failed to update notification schedules:", err);
+    }
+  }
 
   // Cascade Update Notifications
   if (body.productName || body.expiryDate) {
@@ -159,6 +184,12 @@ export const removeWarrantyService = async (userId, warrantyId) => {
   });
 
   await dynamodb.send(command);
+
+  try {
+    await deleteExpiryNotifications(warrantyId);
+  } catch (err) {
+    console.error("Critical: Failed to cleanup schedules on delete:", err);
+  }
 
   // --- Cascade Delete Notifications ---
   const queryCommand = new QueryCommand({
