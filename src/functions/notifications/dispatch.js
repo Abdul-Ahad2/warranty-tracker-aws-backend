@@ -58,7 +58,7 @@ export const handler = async (event) => {
       message: subject,
       type: "EXPIRY_NOTICE",
       createdAt: new Date().toISOString(),
-      read: false
+      isRead: false
     };
 
     await dynamodb.send(new PutItemCommand({

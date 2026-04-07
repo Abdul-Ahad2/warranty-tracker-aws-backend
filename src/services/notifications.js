@@ -1,10 +1,9 @@
-import { QueryCommand } from "@aws-sdk/client-dynamodb";
+import { QueryCommand, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { dynamodb } from "../libs/aws.js";
 
 export const getNotificationsService = async (userId) => {
-  // 1. Fetch History from 'notifications' table
-  const historyCommand = new QueryCommand({
+  const command = new QueryCommand({
     TableName: "notifications",
     IndexName: "userId-createdAt-index",
     KeyConditionExpression: "userId = :userId",
@@ -14,59 +13,41 @@ export const getNotificationsService = async (userId) => {
     ScanIndexForward: false,
   });
 
-  const historyResult = await dynamodb.send(historyCommand);
-  const historyNotifications = historyResult.Items
+  const result = await dynamodb.send(command);
+  
+  // Clean up: filter out any "broken" notifications missing critical data
+  const notifications = result.Items
     .map((item) => unmarshall(item))
-    .filter(n => n.message); // Only show actual triggered alerts, not registration logs
-
-  // 2. Fetch Live Alerts from 'warranties' table (< 60 days remaining)
-  const warrantiesCommand = new QueryCommand({
-    TableName: "warranties",
-    IndexName: "userId-index",
-    KeyConditionExpression: "userId = :userId",
-    ExpressionAttributeValues: { ":userId": { S: userId } },
-  });
-
-  const warrantiesResult = await dynamodb.send(warrantiesCommand);
-  const now = new Date();
-  const sixtyDaysFromNow = new Date();
-  sixtyDaysFromNow.setDate(now.getDate() + 60);
-
-  const dynamicAlerts = warrantiesResult.Items
-    .map(item => unmarshall(item))
-    .filter(w => {
-      const expiry = new Date(w.expiryDate);
-      return expiry <= sixtyDaysFromNow; // Expired or expiring soon
-    })
-    .map(w => {
-      const expiry = new Date(w.expiryDate);
-      const daysLeft = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
-      const expired = daysLeft <= 0;
-
-      return {
-        id: `alert-${w.id}`,
-        userId: w.userId,
-        warrantyId: w.id,
-        productName: w.productName,
-        type: expired ? "EXPIRED" : "EXPIRY_WARNING",
-        title: expired ? "WARRANTY EXPIRED" : "EXPIRY WARNING",
-        message: expired
-          ? `Your ${w.productName} warranty has expired.`
-          : `Your ${w.productName} warranty expires in ${daysLeft} days.`,
-        daysLeft,
-        isRead: false,
-        createdAt: w.createdAt,
-        expiresAt: w.expiryDate,
-        isDynamic: true
-      };
-    });
-
-  // 3. Merge and Sort (Newest alert or notification first)
-  const allNotifications = [...dynamicAlerts, ...historyNotifications]
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    .filter(n => n.message && n.type);
 
   return {
-    notifications: allNotifications,
-    unreadCount: allNotifications.filter((n) => !n.isRead).length,
+    notifications,
+    unreadCount: notifications.filter((n) => !n.isRead).length,
   };
+};
+
+export const markNotificationReadService = async (userId, id) => {
+  // Update the notification using a ConditionExpression for security (verify ownership)
+  const updateCommand = new UpdateItemCommand({
+    TableName: "notifications",
+    Key: {
+      id: { S: id },
+    },
+    UpdateExpression: "SET isRead = :isRead",
+    ConditionExpression: "userId = :userId",
+    ExpressionAttributeValues: {
+      ":isRead": { BOOL: true },
+      ":userId": { S: userId },
+    },
+  });
+
+  try {
+    await dynamodb.send(updateCommand);
+    return { message: "Notification marked as read" };
+  } catch (error) {
+    if (error.name === "ConditionalCheckFailedException") {
+      throw { statusCode: 403, message: "Notification not found or access denied" };
+    }
+    throw error;
+  }
 };

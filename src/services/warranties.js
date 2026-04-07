@@ -1,7 +1,8 @@
-import { PutItemCommand, UpdateItemCommand, QueryCommand, DeleteItemCommand } from "@aws-sdk/client-dynamodb";
+import { PutItemCommand, UpdateItemCommand, QueryCommand, DeleteItemCommand, GetItemCommand } from "@aws-sdk/client-dynamodb";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
+import { DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { v4 as uuid } from "uuid";
-import { dynamodb } from "../libs/aws.js";
+import { dynamodb, s3 } from "../libs/aws.js";
 import { scheduleExpiryNotifications, deleteExpiryNotifications } from "./scheduler.js";
 
 export const createWarrantyService = async (userId, body) => {
@@ -33,8 +34,6 @@ export const createWarrantyService = async (userId, body) => {
 
   await dynamodb.send(warrantyCommand);
 
-  await dynamodb.send(warrantyCommand);
-
   const warranty = {
     id: warrantyId,
     userId: userId,
@@ -42,13 +41,10 @@ export const createWarrantyService = async (userId, body) => {
     expiryDate: body.expiryDate,
   };
 
-  // Create the alarms (Awaiting ensures we see confirmation logs in CloudWatch)
   try {
     await scheduleExpiryNotifications(warranty);
   } catch (err) {
     console.error("Critical: Failed to schedule expiry alarms:", err);
-    // Note: We still return success for the warranty creation, 
-    // but the logs will now show the alarm failure clearly.
   }
 
   return { message: "Warranty created successfully", warrantyId };
@@ -109,13 +105,13 @@ export const updateWarrantyService = async (userId, warrantyId, body) => {
     // 1. Delete old schedules & 2. Re-schedule (Awaiting ensures logs are captured)
     try {
       await deleteExpiryNotifications(warrantyId);
-      
+
       const getCommand = new QueryCommand({
         TableName: "warranties",
         KeyConditionExpression: "id = :id",
         ExpressionAttributeValues: { ":id": { S: warrantyId } }
       });
-      
+
       const res = await dynamodb.send(getCommand);
       if (res.Items && res.Items[0]) {
         const fullWarranty = unmarshall(res.Items[0]);
@@ -172,6 +168,39 @@ export const updateWarrantyService = async (userId, warrantyId, body) => {
 export const removeWarrantyService = async (userId, warrantyId) => {
   if (!warrantyId) throw new Error("Validation Error: id is required");
 
+  // 1. Fetch warranty to get pictureUrl for S3 cleanup
+  const getCommand = new GetItemCommand({
+    TableName: "warranties",
+    Key: { id: { S: warrantyId } },
+  });
+
+  const getResult = await dynamodb.send(getCommand);
+  if (getResult.Item) {
+    const warranty = unmarshall(getResult.Item);
+    
+    // Check ownership
+    if (warranty.userId !== userId) {
+      throw new Error("Access Denied: You do not own this warranty");
+    }
+
+    // 2. Delete image from S3 if it exists
+    if (warranty.pictureUrl && warranty.pictureUrl.includes(process.env.S3_BUCKET_NAME)) {
+      try {
+        const url = new URL(warranty.pictureUrl);
+        const key = url.pathname.substring(1); // Remove leading slash
+        
+        await s3.send(new DeleteObjectCommand({
+          Bucket: process.env.S3_BUCKET_NAME,
+          Key: key,
+        }));
+        console.log(`Deleted S3 object: ${key}`);
+      } catch (err) {
+        console.warn("Failed to delete S3 object (might already be gone):", err.message);
+      }
+    }
+  }
+
+  // 3. Delete from DynamoDB
   const command = new DeleteItemCommand({
     TableName: "warranties",
     Key: {

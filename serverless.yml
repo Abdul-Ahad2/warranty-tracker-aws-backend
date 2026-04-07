@@ -61,6 +61,7 @@ provider:
           Action:
             - "s3:PutObject"
             - "s3:GetObject"
+            - "s3:DeleteObject"
           Resource: "arn:aws:s3:::${self:provider.environment.S3_BUCKET_NAME}/*"
 
         - Effect: "Allow"
@@ -141,6 +142,15 @@ functions:
     events:
       - httpApi:
           path: /settings
+          method: PUT
+          authorizer:
+            name: cognitoAuthorizer
+
+  markNotificationRead:
+    handler: src/functions/notifications/update.handler
+    events:
+      - httpApi:
+          path: /notifications/{id}
           method: PUT
           authorizer:
             name: cognitoAuthorizer
